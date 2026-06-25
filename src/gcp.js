@@ -283,6 +283,15 @@ async function waitForZoneOperation(operationsClient, projectId, zone, operation
       zone,
     });
   }
+  // A GCE operation can finish with status DONE but still carry an error
+  // (e.g. resource exhausted, quota, image architecture mismatch). Surface it
+  // instead of silently proceeding to a non-existent instance.
+  if (operation.error) {
+    const details = (operation.error.errors || [])
+      .map((e) => `${e.code}: ${e.message}`)
+      .join('; ');
+    throw new Error(`GCE operation failed: ${details || JSON.stringify(operation.error)}`);
+  }
   return operation;
 }
 
