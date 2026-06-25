@@ -1,0 +1,204 @@
+name: On-demand self-hosted GCP Compute Engine runner for GitHub Actions
+description: GitHub Action for automatic creation and registration of a Google Compute Engine instance as a GitHub Actions self-hosted runner.
+author: Pedro Verissimo
+branding:
+  icon: 'box'
+  color: 'blue'
+inputs:
+  mode:
+    description: >-
+      Specify here which mode you want to use:
+        - 'start' - to start a new runner;
+        - 'stop' - to stop the previously created runner.
+    required: true
+  github-token:
+    description: >-
+      GitHub Personal Access Token with the 'repo' scope assigned.
+    required: true
+  project-id:
+    description: >-
+      Google Cloud project ID where the instance will be created.
+      If not provided, the action falls back to the GCP_PROJECT_ID, GOOGLE_CLOUD_PROJECT
+      or GCLOUD_PROJECT environment variables (the latter two are exported by
+      google-github-actions/auth).
+    required: false
+  zones-config:
+    description: >-
+      JSON string array of objects with configurations for multiple zones (multi-zone failover).
+      Each object should contain 'image', 'zone' and 'subnet'.
+      Optionally, you can specify 'networkTags' (array) and 'network'.
+      Example: '[{"image":"projects/debian-cloud/global/images/family/debian-12","zone":"us-central1-a","subnet":"default"},{"image":"projects/debian-cloud/global/images/family/debian-12","zone":"us-east1-b","subnet":"default"}]'
+      When provided, the action will try each configuration in sequence until a successful instance is launched.
+      This takes precedence over individual image, zone, subnet and network-tags parameters.
+    required: false
+  image:
+    description: >-
+      Source image for the boot disk. The new runner will be launched from this image.
+      Accepts a full image path, e.g.
+      'projects/debian-cloud/global/images/family/debian-12' (image family) or
+      'projects/my-project/global/images/my-custom-image' (specific image).
+      This input is required if you use the 'start' mode and don't provide zones-config.
+    required: false
+  machine-type:
+    description: >-
+      Compute Engine machine type, e.g. 'e2-small', 'n2-standard-4'.
+      This input is required if you use the 'start' mode.
+    required: false
+  zone:
+    description: >-
+      Compute Engine zone where the instance will be created, e.g. 'us-central1-a'.
+      This input is required if you use the 'start' mode and don't provide zones-config.
+    required: false
+  subnet:
+    description: >-
+      Name (or full self-link) of the VPC subnetwork the instance will be attached to.
+      The subnet must exist in the region that contains the chosen zone.
+      This input is required if you use the 'start' mode and don't provide zones-config.
+    required: false
+  network:
+    description: >-
+      Name (or full self-link) of the VPC network. Defaults to 'default'.
+      Only needed when 'subnet' is provided as a short name and lives in a non-default network.
+    required: false
+  network-tags:
+    description: >-
+      JSON array of network tags to apply to the instance. Firewall rules are matched
+      against these tags (the GCP equivalent of an AWS security group).
+      Only outbound traffic on TCP/443 is required to pull jobs from GitHub.
+      Example: '["github-runner"]'
+    required: false
+    default: '[]'
+  no-external-ip:
+    description: >-
+      When 'true', the instance is created without an external IP address.
+      In that case the subnet must have Cloud NAT / Private Google Access configured
+      so the runner can reach GitHub. Default: 'false'.
+    required: false
+    default: 'false'
+  label:
+    description: >-
+      Name of the unique label assigned to the runner.
+      The label is used to remove the runner from GitHub when the runner is not needed anymore.
+      This input is required if you use the 'stop' mode.
+    required: false
+  instance-id:
+    description: >-
+      Compute Engine instance name of the created runner.
+      The name is used to delete the instance when the runner is not needed anymore.
+      This input is required if you use the 'stop' mode.
+    required: false
+  instance-zone:
+    description: >-
+      Zone of the instance to delete. Required (together with 'instance-id') in the 'stop' mode.
+    required: false
+  service-account-email:
+    description: >-
+      Email of the service account to attach to the created instance. This lets the runner
+      authenticate to Google Cloud APIs from within the workflow.
+    required: false
+  service-account-scopes:
+    description: >-
+      JSON array of OAuth scopes for the attached service account.
+      Default: '["https://www.googleapis.com/auth/cloud-platform"]'
+    required: false
+    default: '["https://www.googleapis.com/auth/cloud-platform"]'
+  resource-labels:
+    description: >-
+      Labels to attach to the launched instance.
+      This must be a stringified array of objects, with both Key and Value fields,
+      for example: '[{"Key": "team", "Value": "ci"}, {"Key": "env", "Value": "test"}]'.
+      GCP label keys and values must be lowercase letters, numbers, dashes and underscores.
+    required: false
+    default: '[]'
+  runner-home-dir:
+    description: >-
+      Directory that contains actions-runner software and scripts. E.g. /home/runner/actions-runner.
+    required: false
+  pre-runner-script:
+    description: >-
+      Specifies bash commands to run before the runner starts. It's useful for installing dependencies with apt-get, yum, dnf, etc.
+    required: false
+  spot:
+    description: >-
+      When 'true', the instance is created as a Spot VM (preemptible, cheaper, can be reclaimed by GCP).
+      Default: 'false'.
+    required: false
+    default: 'false'
+  startup-quiet-period-seconds:
+    description: >-
+      Specifies the quiet period in seconds after the instance starts.
+      The runner will not be checked for registration during this period.
+    required: false
+  startup-retry-interval-seconds:
+    description: >-
+      Specifies the retry interval in seconds to check the runner registration after the quiet period.
+    required: false
+  startup-timeout-minutes:
+    description: >-
+      Specifies the timeout in minutes to register the runner after the quiet period.
+    required: false
+    default: '5'
+  run-runner-as-service:
+    description: >-
+      Start the runner as a service rather than using ./run.sh as root.
+    required: false
+    default: 'false'
+  run-runner-as-user:
+    description: >-
+      Specify user under whom the runner service should run.
+    required: false
+  boot-disk-size:
+    description: >-
+      Boot disk size in GB. Uses the image default if not provided.
+    required: false
+  boot-disk-type:
+    description: >-
+      Boot disk type, e.g. 'pd-standard', 'pd-balanced', 'pd-ssd'. Default: 'pd-balanced'.
+    required: false
+    default: 'pd-balanced'
+  packages:
+    description: >-
+      JSON array of packages to install during boot via apt-get/yum/dnf.
+      Example: '["git", "docker.io", "nodejs"]'
+    required: false
+    default: '[]'
+  use-jit:
+    description: >-
+      Enable JIT (Just-In-Time) runner configuration. Uses GitHub's
+      generate-jitconfig API instead of the traditional registration-token approach.
+      JIT runners are single-use and auto-deregister after completing one job.
+      Incompatible with 'run-runner-as-service: true'.
+    required: false
+    default: 'false'
+  runner-group-id:
+    description: >-
+      The ID of the runner group to register the JIT runner in.
+      Defaults to 1, which is the "Default" runner group for repository-level runners.
+      Only used when 'use-jit' is true.
+    required: false
+    default: '1'
+  runner-debug:
+    description: >-
+      Enable verbose debug logging for the runner setup.
+      When true, outputs detailed instance info, serial console output polling,
+      and step-by-step script execution logs.
+    required: false
+    default: 'false'
+outputs:
+  label:
+    description: >-
+      Name of the unique label assigned to the runner.
+      The label is used in two cases:
+      - to use as the input of 'runs-on' property for the following jobs;
+      - to remove the runner from GitHub when it is not needed anymore.
+  instance-id:
+    description: >-
+      Compute Engine instance name of the created runner.
+      The name is used to delete the instance when the runner is not needed anymore.
+  zone:
+    description: >-
+      Compute Engine zone where the instance was created.
+      This is required to delete the instance in the 'stop' mode.
+runs:
+  using: node24
+  main: ./dist/index.js
