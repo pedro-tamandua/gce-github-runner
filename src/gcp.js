@@ -253,9 +253,21 @@ function buildNetworkInterface(zoneConfig) {
   return networkInterface;
 }
 
+// Machine families that only support Hyperdisk (Persistent Disk is rejected).
+const HYPERDISK_ONLY_FAMILIES = ['n4', 'n4a', 'c4', 'c4a', 'c4d', 'x4', 'm4'];
+
 function buildBootDisk(zoneConfig) {
   const region = regionFromZone(zoneConfig.zone);
-  const diskType = config.input.bootDiskType || 'pd-balanced';
+  let diskType = config.input.bootDiskType || 'pd-balanced';
+
+  // Newer machine families (N4, N4A, C4, C4A, ...) reject pd-* disks. When such
+  // a machine type is requested with a Persistent Disk type, transparently
+  // switch to hyperdisk-balanced so the instance can boot.
+  const family = (config.input.machineType || '').split('-')[0].toLowerCase();
+  if (HYPERDISK_ONLY_FAMILIES.includes(family) && diskType.startsWith('pd-')) {
+    core.info(`Machine family '${family}' requires Hyperdisk; overriding boot disk type '${diskType}' with 'hyperdisk-balanced'`);
+    diskType = 'hyperdisk-balanced';
+  }
 
   const initializeParams = {
     sourceImage: zoneConfig.image,
