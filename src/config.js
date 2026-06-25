@@ -102,9 +102,10 @@ class Config {
             if (!z.subnet) {
               throw new Error(`Missing subnet in zones-config at index ${index}`);
             }
-            // Optional fields with defaults
+            // Optional fields. Leave network empty when not set so GCE infers
+            // it from the subnetwork (avoids non-default VPC mismatches).
             if (!z.network) {
-              z.network = this.input.network || 'default';
+              z.network = this.input.network || '';
             }
             if (!z.networkTags) {
               z.networkTags = this.input.networkTags;
@@ -132,7 +133,7 @@ class Config {
           image: this.input.image,
           zone: this.input.zone,
           subnet: this.input.subnet,
-          network: this.input.network || 'default',
+          network: this.input.network || '',
           networkTags: this.input.networkTags,
         });
 

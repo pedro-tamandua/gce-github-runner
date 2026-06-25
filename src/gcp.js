@@ -224,20 +224,21 @@ function buildScheduling() {
 // Build the network interface, resolving subnet/network short names to self-links.
 function buildNetworkInterface(zoneConfig) {
   const region = regionFromZone(zoneConfig.zone);
-  const network = zoneConfig.network || 'default';
 
   const subnetwork = zoneConfig.subnet.startsWith('http') || zoneConfig.subnet.includes('/')
     ? zoneConfig.subnet
     : `projects/${config.projectId}/regions/${region}/subnetworks/${zoneConfig.subnet}`;
 
-  const networkSelfLink = network.startsWith('http') || network.includes('/')
-    ? network
-    : `projects/${config.projectId}/global/networks/${network}`;
+  const networkInterface = { subnetwork };
 
-  const networkInterface = {
-    network: networkSelfLink,
-    subnetwork,
-  };
+  // Only set 'network' when explicitly provided. When omitted, GCE infers the
+  // network from the subnetwork, which avoids "Subnetwork does not belong to the
+  // network" errors when the subnet lives in a non-default VPC.
+  if (zoneConfig.network) {
+    networkInterface.network = zoneConfig.network.startsWith('http') || zoneConfig.network.includes('/')
+      ? zoneConfig.network
+      : `projects/${config.projectId}/global/networks/${zoneConfig.network}`;
+  }
 
   if (!config.input.noExternalIp) {
     // Ephemeral external IP so the runner can reach GitHub without Cloud NAT.
