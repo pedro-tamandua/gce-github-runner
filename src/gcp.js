@@ -179,8 +179,68 @@ function buildJitRunCommands(encodedJitConfig) {
   return userData;
 }
 
-// Build the metadata startup-script content (a plain bash script for GCE).
+// Build the PowerShell run commands for a Windows runner.
+function buildWindowsRunCommands(githubRegistrationToken, label, encodedJitConfig) {
+  const debug = config.input.runnerDebug;
+  const dbg = (cmd) => (debug ? cmd : null);
+  const repoUrl = `https://github.com/${config.githubContext.owner}/${config.githubContext.repo}`;
+
+  const lines = [
+    '$ErrorActionPreference = "Stop"',
+    dbg('Write-Host "[RUNNER] =========================================="'),
+    dbg('Write-Host "[RUNNER] Windows setup started at $(Get-Date -Format o)"'),
+    dbg('Write-Host "[RUNNER] Hostname: $env:COMPUTERNAME"'),
+  ].filter(Boolean);
+
+  if (config.input.runnerHomeDir) {
+    core.info('Runner home directory is specified, so it is expected that the actions-runner software is pre-installed in the image.');
+    lines.push(`Set-Location "${config.input.runnerHomeDir}"`);
+    // Remove stale runner config from the image so config.cmd doesn't refuse to run
+    lines.push('Remove-Item -Force .runner,.credentials,.credentials_rsaparams -ErrorAction SilentlyContinue');
+  } else {
+    core.info('Runner home directory is not specified, so the latest actions-runner software will be downloaded and installed.');
+    lines.push('New-Item -ItemType Directory -Path C:\\actions-runner -Force | Out-Null');
+    lines.push('Set-Location C:\\actions-runner');
+    lines.push(dbg('Write-Host "[RUNNER] Fetching latest runner version..."'));
+    lines.push('$RUNNER_VERSION = (Invoke-RestMethod -Uri "https://api.github.com/repos/actions/runner/releases/latest").tag_name.TrimStart("v")');
+    lines.push(dbg('Write-Host "[RUNNER] Runner version: $RUNNER_VERSION"'));
+    lines.push('Invoke-WebRequest -Uri "https://github.com/actions/runner/releases/download/v$RUNNER_VERSION/actions-runner-win-x64-$RUNNER_VERSION.zip" -OutFile actions-runner.zip');
+    lines.push('Add-Type -AssemblyName System.IO.Compression.FileSystem');
+    lines.push('[System.IO.Compression.ZipFile]::ExtractToDirectory("$PWD\\actions-runner.zip", "$PWD")');
+  }
+
+  if (encodedJitConfig) {
+    lines.push(dbg('Write-Host "[RUNNER] Starting JIT runner"'));
+    // Detach run.cmd so the GCE startup-script can finish while the runner keeps running.
+    lines.push(`Start-Process -FilePath ".\\run.cmd" -ArgumentList "--jitconfig","${encodedJitConfig}" -WindowStyle Hidden`);
+  } else {
+    lines.push(dbg(`Write-Host "[RUNNER] Configuring runner with label: ${label}"`));
+    lines.push(`.\\config.cmd --unattended --url ${repoUrl} --token ${githubRegistrationToken} --labels ${label} --name gce-${label} --replace`);
+    lines.push(dbg('Write-Host "[RUNNER] config.cmd completed"'));
+    lines.push('Start-Process -FilePath ".\\run.cmd" -WindowStyle Hidden');
+  }
+  return lines.filter(Boolean);
+}
+
+// Build the metadata windows-startup-script-ps1 content (PowerShell) for Windows.
+function buildWindowsStartupScript(githubRegistrationToken, label, encodedJitConfig) {
+  const lines = [];
+  if (config.input.preRunnerScript) {
+    lines.push('# --- pre-runner script ---');
+    lines.push(config.input.preRunnerScript);
+    lines.push('# --- end pre-runner script ---');
+  }
+  lines.push(...buildWindowsRunCommands(githubRegistrationToken, label, encodedJitConfig));
+  // Windows startup scripts expect CRLF line endings.
+  return lines.join('\r\n') + '\r\n';
+}
+
+// Build the metadata startup-script content (bash for Linux, PowerShell for Windows).
 function buildStartupScript(githubRegistrationToken, label, encodedJitConfig) {
+  if (config.input.os === 'windows') {
+    return buildWindowsStartupScript(githubRegistrationToken, label, encodedJitConfig);
+  }
+
   const runCommands = encodedJitConfig
     ? buildJitRunCommands(encodedJitConfig)
     : buildRunCommands(githubRegistrationToken, label);
@@ -313,7 +373,9 @@ async function createInstanceWithParams(zoneConfig, instanceName, label, githubR
 
   const startupScript = buildStartupScript(githubRegistrationToken, label, encodedJitConfig);
 
-  const metadataItems = [{ key: 'startup-script', value: startupScript }];
+  // Windows VMs use a different metadata key (PowerShell) than Linux.
+  const metadataKey = config.input.os === 'windows' ? 'windows-startup-script-ps1' : 'startup-script';
+  const metadataItems = [{ key: metadataKey, value: startupScript }];
 
   const instanceResource = {
     name: instanceName,

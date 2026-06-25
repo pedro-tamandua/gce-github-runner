@@ -44,6 +44,15 @@ inputs:
       Compute Engine machine type, e.g. 'e2-small', 'n2-standard-4'.
       This input is required if you use the 'start' mode.
     required: false
+  os:
+    description: >-
+      Operating system of the runner VM: 'linux' (default) or 'windows'.
+      For 'windows', the action provisions the runner via a PowerShell
+      startup-script (windows-startup-script-ps1), downloads actions-runner-win-x64,
+      and configures it with config.cmd/run.cmd. Use a Windows image (e.g.
+      'projects/windows-cloud/global/images/family/windows-2022') accordingly.
+    required: false
+    default: 'linux'
   zone:
     description: >-
       Compute Engine zone where the instance will be created, e.g. 'us-central1-a'.

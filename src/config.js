@@ -14,6 +14,7 @@ class Config {
       label: core.getInput('label'),
       spot: core.getInput('spot') === 'true',
       mode: core.getInput('mode'),
+      os: (core.getInput('os') || 'linux').toLowerCase(),
       preRunnerScript: core.getInput('pre-runner-script'),
       runnerHomeDir: core.getInput('runner-home-dir'),
       zone: core.getInput('zone'),
@@ -138,6 +139,10 @@ class Config {
         });
 
         core.info('Using individual parameters as a single zone configuration');
+      }
+
+      if (this.input.os !== 'linux' && this.input.os !== 'windows') {
+        throw new Error(`Invalid 'os' input '${this.input.os}'. Allowed values: linux, windows.`);
       }
 
       if (this.input.useJit && this.input.runAsService) {

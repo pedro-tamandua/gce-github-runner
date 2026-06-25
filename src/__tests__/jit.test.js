@@ -39,6 +39,7 @@ jest.mock('@google-cloud/compute', () => ({
 const defaultInputs = {
   'mode': 'start',
   'github-token': 'test-token',
+  'os': 'linux',
   'project-id': 'test-project',
   'image': 'projects/debian-cloud/global/images/family/debian-12',
   'machine-type': 'e2-small',
@@ -347,6 +348,52 @@ describe('gcp.js - runner-debug', () => {
     const gcp = loadFreshGcp({ 'runner-debug': 'false' });
     const script = gcp._buildStartupScriptForTest('regtoken123', 'testlabel', null);
     expect(script).not.toContain('[RUNNER] Setup script started');
+  });
+});
+
+describe('gcp.js - Windows os', () => {
+  test('config accepts os=windows', () => {
+    setupInputs({ os: 'windows' });
+    const config = createConfig();
+    expect(config.input.os).toBe('windows');
+  });
+
+  test('config rejects invalid os', () => {
+    setupInputs({ os: 'macos' });
+    expect(() => createConfig()).toThrow("Invalid 'os' input");
+  });
+
+  test('windows startup-script uses PowerShell + config.cmd/run.cmd', () => {
+    const gcp = loadFreshGcp({ os: 'windows' });
+    const script = gcp._buildStartupScriptForTest('regtoken123', 'testlabel', null);
+    expect(script).toContain('actions-runner-win-x64');
+    expect(script).toContain('config.cmd --unattended');
+    expect(script).toContain('--token regtoken123');
+    expect(script).toContain('run.cmd');
+    expect(script).not.toContain('config.sh');
+    expect(script).not.toContain('#!/bin/bash');
+  });
+
+  test('windows JIT uses run.cmd --jitconfig and no config.cmd', () => {
+    const gcp = loadFreshGcp({ os: 'windows', 'use-jit': 'true' });
+    const script = gcp._buildStartupScriptForTest(null, 'testlabel', 'encodedconfig123');
+    expect(script).toContain('--jitconfig');
+    expect(script).toContain('encodedconfig123');
+    expect(script).not.toContain('config.cmd');
+  });
+
+  test('windows startup-script removes stale runner config when home dir set', () => {
+    const gcp = loadFreshGcp({ os: 'windows', 'runner-home-dir': 'C:\\\\actions-runner' });
+    const script = gcp._buildStartupScriptForTest('regtoken123', 'testlabel', null);
+    expect(script).toContain('Remove-Item');
+    expect(script).not.toContain('actions-runner-win-x64');
+  });
+
+  test('linux remains the default os', () => {
+    const gcp = loadFreshGcp();
+    const script = gcp._buildStartupScriptForTest('regtoken123', 'testlabel', null);
+    expect(script).toContain('#!/bin/bash');
+    expect(script).toContain('config.sh');
   });
 });
 
