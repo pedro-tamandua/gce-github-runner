@@ -207,6 +207,36 @@ describe('Config - GCP specifics', () => {
     expect(() => createConfig()).toThrow("'image' and 'subnet' are also required");
   });
 
+  test('default provisioning model is spot with fallback', () => {
+    setupInputs();
+    const config = createConfig();
+    expect(config.provisioningModel).toBe('spot');
+    expect(config.provisioningFallback).toBe(true);
+  });
+
+  test('provisioning-model standard is honored', () => {
+    setupInputs({ 'provisioning-model': 'standard' });
+    const config = createConfig();
+    expect(config.provisioningModel).toBe('standard');
+  });
+
+  test('provisioning-fallback false disables fallback', () => {
+    setupInputs({ 'provisioning-fallback': 'false' });
+    const config = createConfig();
+    expect(config.provisioningFallback).toBe(false);
+  });
+
+  test('legacy spot=true aliases to provisioning-model spot', () => {
+    setupInputs({ 'spot': 'true', 'provisioning-model': 'standard' });
+    const config = createConfig();
+    expect(config.provisioningModel).toBe('spot');
+  });
+
+  test('invalid provisioning-model throws', () => {
+    setupInputs({ 'provisioning-model': 'cheap' });
+    expect(() => createConfig()).toThrow("Invalid 'provisioning-model'");
+  });
+
   test('stop mode requires instance-id and instance-zone', () => {
     setupInputs({ 'mode': 'stop', 'instance-id': '', 'instance-zone': '' });
     expect(() => createConfig()).toThrow("The 'instance-id' input is required");

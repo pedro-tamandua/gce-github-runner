@@ -268,9 +268,9 @@ function buildStartupScript(githubRegistrationToken, label, encodedJitConfig) {
 }
 
 // Build the scheduling block for Spot VMs.
-function buildScheduling() {
-  if (!config.input.spot) {
-    return undefined;
+function buildScheduling(provisioningModel) {
+  if (provisioningModel !== 'spot') {
+    return undefined; // standard / on-demand
   }
   return {
     provisioningModel: 'SPOT',
@@ -367,7 +367,7 @@ async function waitForZoneOperation(operationsClient, projectId, zone, operation
   return operation;
 }
 
-async function createInstanceWithParams(zoneConfig, instanceName, label, githubRegistrationToken, encodedJitConfig) {
+async function createInstanceWithParams(zoneConfig, instanceName, label, githubRegistrationToken, encodedJitConfig, provisioningModel) {
   const instancesClient = new compute.InstancesClient();
   const operationsClient = new compute.ZoneOperationsClient();
 
@@ -383,7 +383,7 @@ async function createInstanceWithParams(zoneConfig, instanceName, label, githubR
     disks: [buildBootDisk(zoneConfig)],
     networkInterfaces: [buildNetworkInterface(zoneConfig)],
     metadata: { items: metadataItems },
-    scheduling: buildScheduling(),
+    scheduling: buildScheduling(provisioningModel),
   };
 
   if (zoneConfig.networkTags && zoneConfig.networkTags.length > 0) {
@@ -438,30 +438,41 @@ async function startInstance(label, githubRegistrationToken, encodedJitConfig) {
     core.info(`zone=any resolved to ${zones.length} zone(s) in ${config.anyZoneRegion}: ${zones.join(', ')}`);
   }
 
-  core.info(`Attempting to start GCE instance using ${config.zones.length} zone configuration(s)`);
+  // Provisioning models to try, in order. The preferred one is attempted across
+  // ALL zones first; only if it has no capacity anywhere do we fall back to the other.
+  const other = config.provisioningModel === 'spot' ? 'standard' : 'spot';
+  const models = config.provisioningFallback ? [config.provisioningModel, other] : [config.provisioningModel];
+
+  core.info(
+    `Attempting to start GCE instance across ${config.zones.length} zone(s); ` +
+    `provisioning model preference: ${models.join(' -> ')}`
+  );
 
   const instanceName = config.generateInstanceName(label);
   const errors = [];
 
-  for (let i = 0; i < config.zones.length; i++) {
-    const zoneConfig = config.zones[i];
-    core.info(`Trying zone configuration ${i + 1}/${config.zones.length}`);
-    core.info(`Using image: ${zoneConfig.image}, zone: ${zoneConfig.zone}, subnet: ${zoneConfig.subnet}`);
+  for (const model of models) {
+    core.info(`=== Trying provisioning model: ${model} ===`);
+    for (let i = 0; i < config.zones.length; i++) {
+      const zoneConfig = config.zones[i];
+      core.info(`[${model}] zone ${i + 1}/${config.zones.length} — image: ${zoneConfig.image}, zone: ${zoneConfig.zone}, subnet: ${zoneConfig.subnet}`);
 
-    try {
-      await createInstanceWithParams(zoneConfig, instanceName, label, githubRegistrationToken, encodedJitConfig);
-      core.info(`Successfully started GCE instance ${instanceName} using zone configuration ${i + 1} in zone ${zoneConfig.zone}`);
-      return { instanceId: instanceName, zone: zoneConfig.zone };
-    } catch (error) {
-      const errorMessage = `Failed to start GCE instance with configuration ${i + 1} in zone ${zoneConfig.zone}: ${error.message}`;
-      core.warning(errorMessage);
-      errors.push(errorMessage);
-      continue;
+      try {
+        await createInstanceWithParams(zoneConfig, instanceName, label, githubRegistrationToken, encodedJitConfig, model);
+        core.info(`Successfully started GCE instance ${instanceName} as '${model}' in zone ${zoneConfig.zone}`);
+        return { instanceId: instanceName, zone: zoneConfig.zone, provisioningModel: model };
+      } catch (error) {
+        const errorMessage = `[${model}] zone ${zoneConfig.zone} failed: ${error.message}`;
+        core.warning(errorMessage);
+        errors.push(errorMessage);
+        continue;
+      }
     }
+    core.warning(`No capacity for provisioning model '${model}' in any zone.`);
   }
 
-  core.error('All zone configurations failed');
-  throw new Error(`Failed to start GCE instance in any zone. Errors: ${errors.join('; ')}`);
+  core.error('All provisioning models and zones failed');
+  throw new Error(`Failed to start GCE instance. Errors: ${errors.join('; ')}`);
 }
 
 async function terminateInstance() {

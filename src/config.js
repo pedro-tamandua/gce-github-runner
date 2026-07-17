@@ -12,7 +12,13 @@ class Config {
       serviceAccountEmail: core.getInput('service-account-email'),
       serviceAccountScopes: JSON.parse(core.getInput('service-account-scopes') || '["https://www.googleapis.com/auth/cloud-platform"]'),
       label: core.getInput('label'),
-      spot: core.getInput('spot') === 'true',
+      // Provisioning model preference. Spot is the default; 'provisioning-fallback'
+      // (default true) makes it try the other model if the preferred has no capacity.
+      // Legacy: 'spot: true' is honored as an alias for provisioning-model=spot.
+      provisioningModel: (core.getInput('spot') === 'true'
+        ? 'spot'
+        : (core.getInput('provisioning-model') || 'spot')).toLowerCase(),
+      provisioningFallback: core.getInput('provisioning-fallback') !== 'false',
       mode: core.getInput('mode'),
       os: (core.getInput('os') || 'linux').toLowerCase(),
       preRunnerScript: core.getInput('pre-runner-script'),
@@ -165,6 +171,13 @@ class Config {
       if (this.input.os !== 'linux' && this.input.os !== 'windows') {
         throw new Error(`Invalid 'os' input '${this.input.os}'. Allowed values: linux, windows.`);
       }
+
+      if (this.input.provisioningModel !== 'spot' && this.input.provisioningModel !== 'standard') {
+        throw new Error(`Invalid 'provisioning-model' input '${this.input.provisioningModel}'. Allowed values: spot, standard.`);
+      }
+      // Expose at top level for gcp.js
+      this.provisioningModel = this.input.provisioningModel;
+      this.provisioningFallback = this.input.provisioningFallback;
 
       if (this.input.useJit && this.input.runAsService) {
         throw new Error(
