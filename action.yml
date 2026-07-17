@@ -56,7 +56,14 @@ inputs:
   zone:
     description: >-
       Compute Engine zone where the instance will be created, e.g. 'us-central1-a'.
+      Set to 'any' to try every UP zone of the region given in 'region' until one
+      has capacity (useful for scarce machine types like T2A/N4A that STOCKOUT).
       This input is required if you use the 'start' mode and don't provide zones-config.
+    required: false
+  region:
+    description: >-
+      Compute Engine region (e.g. 'us-central1'). Required only when 'zone' is 'any':
+      the action lists the region's UP zones and tries each in sequence (failover).
     required: false
   subnet:
     description: >-

@@ -18,6 +18,7 @@ class Config {
       preRunnerScript: core.getInput('pre-runner-script'),
       runnerHomeDir: core.getInput('runner-home-dir'),
       zone: core.getInput('zone'),
+      region: core.getInput('region'),
       subnet: core.getInput('subnet'),
       network: core.getInput('network'),
       networkTags: JSON.parse(core.getInput('network-tags') || '[]'),
@@ -122,11 +123,31 @@ class Config {
         throw new Error(`The 'machine-type' input is required for the 'start' mode.`);
       }
 
-      // If no zones config provided, build one from the individual parameters
-      if (this.zones.length === 0) {
+      // Any-zone mode: expand to every UP zone of a region at runtime (failover).
+      this.anyZone = false;
+      if (this.zones.length === 0 && this.input.zone.toLowerCase() === 'any') {
+        if (!this.input.region) {
+          throw new Error(`The 'region' input is required when 'zone' is 'any'.`);
+        }
+        if (!this.input.image || !this.input.subnet) {
+          throw new Error(`When 'zone' is 'any', 'image' and 'subnet' are also required.`);
+        }
+        this.anyZone = true;
+        this.anyZoneRegion = this.input.region;
+        this.anyZoneTemplate = {
+          image: this.input.image,
+          subnet: this.input.subnet,
+          network: this.input.network || '',
+          networkTags: this.input.networkTags,
+        };
+        core.info(`zone=any: zones of region '${this.input.region}' will be resolved at runtime`);
+      }
+
+      // If no zones config provided (and not any-zone), build one from the individual parameters
+      if (this.zones.length === 0 && !this.anyZone) {
         if (!this.input.image || !this.input.zone || !this.input.subnet) {
           throw new Error(
-            `Either provide 'zones-config' or all of the following: 'image', 'zone', 'subnet'`
+            `Either provide 'zones-config', use 'zone: any' with 'region', or all of: 'image', 'zone', 'subnet'`
           );
         }
 

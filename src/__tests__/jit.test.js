@@ -44,6 +44,7 @@ const defaultInputs = {
   'image': 'projects/debian-cloud/global/images/family/debian-12',
   'machine-type': 'e2-small',
   'zone': 'us-central1-a',
+  'region': '',
   'subnet': 'default',
   'network': '',
   'network-tags': '[]',
@@ -186,6 +187,24 @@ describe('Config - GCP specifics', () => {
     setupInputs({ 'resource-labels': '[{"Key":"team","Value":"ci"}]' });
     const config = createConfig();
     expect(config.resourceLabels).toEqual({ team: 'ci' });
+  });
+
+  test('zone=any sets anyZone and requires region', () => {
+    setupInputs({ zone: 'any', region: 'us-central1' });
+    const config = createConfig();
+    expect(config.anyZone).toBe(true);
+    expect(config.anyZoneRegion).toBe('us-central1');
+    expect(config.zones).toHaveLength(0); // resolved at runtime
+  });
+
+  test('zone=any without region throws', () => {
+    setupInputs({ zone: 'any', region: '' });
+    expect(() => createConfig()).toThrow("The 'region' input is required when 'zone' is 'any'");
+  });
+
+  test('zone=any still requires image and subnet', () => {
+    setupInputs({ zone: 'any', region: 'us-central1', image: '' });
+    expect(() => createConfig()).toThrow("'image' and 'subnet' are also required");
   });
 
   test('stop mode requires instance-id and instance-zone', () => {

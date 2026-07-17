@@ -414,7 +414,30 @@ async function createInstanceWithParams(zoneConfig, instanceName, label, githubR
   return instanceName;
 }
 
+// List the UP zones of a region (used by the 'zone: any' failover mode).
+async function listUpZonesInRegion(region) {
+  const zonesClient = new compute.ZonesClient();
+  const zones = [];
+  const iterable = zonesClient.listAsync({ project: config.projectId });
+  for await (const zone of iterable) {
+    if (zone.status === 'UP' && zone.region && zone.region.endsWith(`/regions/${region}`)) {
+      zones.push(zone.name);
+    }
+  }
+  if (zones.length === 0) {
+    throw new Error(`No UP zones found in region '${region}'. Check the region name and permissions (compute.zones.list).`);
+  }
+  return zones.sort();
+}
+
 async function startInstance(label, githubRegistrationToken, encodedJitConfig) {
+  // Resolve 'zone: any' into a concrete list of zones to try (failover).
+  if (config.anyZone) {
+    const zones = await listUpZonesInRegion(config.anyZoneRegion);
+    config.zones = zones.map((z) => ({ ...config.anyZoneTemplate, zone: z }));
+    core.info(`zone=any resolved to ${zones.length} zone(s) in ${config.anyZoneRegion}: ${zones.join(', ')}`);
+  }
+
   core.info(`Attempting to start GCE instance using ${config.zones.length} zone configuration(s)`);
 
   const instanceName = config.generateInstanceName(label);
