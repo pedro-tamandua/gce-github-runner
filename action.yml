@@ -26,7 +26,8 @@ inputs:
     description: >-
       JSON string array of objects with configurations for multiple zones (multi-zone failover).
       Each object should contain 'image', 'zone' and 'subnet'.
-      Optionally, you can specify 'networkTags' (array) and 'network'.
+      Optionally, you can specify 'networkTags' (array), 'network' and 'machineType'
+      (pins the machine type for that entry, overriding 'machine-type').
       Example: '[{"image":"projects/debian-cloud/global/images/family/debian-12","zone":"us-central1-a","subnet":"default"},{"image":"projects/debian-cloud/global/images/family/debian-12","zone":"us-east1-b","subnet":"default"}]'
       When provided, the action will try each configuration in sequence until a successful instance is launched.
       This takes precedence over individual image, zone, subnet and network-tags parameters.
@@ -42,6 +43,10 @@ inputs:
   machine-type:
     description: >-
       Compute Engine machine type, e.g. 'e2-small', 'n2-standard-4'.
+      Accepts a comma-separated list of alternatives in preference order, e.g.
+      'n4a-standard-4,c4a-standard-4': every zone is tried with the first type before
+      moving to the next one. Combinations a zone does not offer are skipped.
+      All types must share the image architecture (ARM vs x86).
       This input is required if you use the 'start' mode.
     required: false
   os:
@@ -64,6 +69,8 @@ inputs:
     description: >-
       Compute Engine region (e.g. 'us-central1'). Required only when 'zone' is 'any':
       the action lists the region's UP zones and tries each in sequence (failover).
+      Accepts a comma-separated list (e.g. 'us-central1,us-east4') to fail over across
+      regions, in the given order; 'subnet' must then exist with the same name in each.
     required: false
   subnet:
     description: >-
@@ -153,6 +160,28 @@ inputs:
       DEPRECATED — use 'provisioning-model' instead. When 'true', acts as an alias for
       'provisioning-model: spot'.
     required: false
+  capacity-retry-minutes:
+    description: >-
+      When every zone, machine type and provisioning model fails for lack of capacity
+      (stockout / quota), keep retrying the whole set for up to this many minutes.
+      Default: '0' (no retry). Retries stop early if no attempt failed for capacity
+      reasons (e.g. a configuration error). The registration token is refreshed
+      automatically on long retries.
+    required: false
+    default: '0'
+  capacity-retry-interval-seconds:
+    description: >-
+      Wait between capacity retry rounds. Default: '60'.
+    required: false
+    default: '60'
+  capacity-advisor:
+    description: >-
+      When 'true', rank the Spot attempts by the Compute Engine Capacity Advisor
+      (advice.capacity, Preview) obtainability and estimated uptime scores before
+      trying them. Requires the 'compute.advice.capacity' permission (roles/compute.viewer).
+      Falls back to the configured order if the API is unavailable. Default: 'false'.
+    required: false
+    default: 'false'
   startup-quiet-period-seconds:
     description: >-
       Specifies the quiet period in seconds after the instance starts.
@@ -228,6 +257,12 @@ outputs:
     description: >-
       Compute Engine zone where the instance was created.
       This is required to delete the instance in the 'stop' mode.
+  machine-type:
+    description: >-
+      Machine type the instance was created with (useful when 'machine-type' lists alternatives).
+  provisioning-model:
+    description: >-
+      Provisioning model the instance was created with: 'spot' or 'standard'.
 runs:
   using: node24
   main: ./dist/index.js

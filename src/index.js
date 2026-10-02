@@ -3,10 +3,12 @@ const gh = require('./gh');
 const config = require('./config');
 const core = require('@actions/core');
 
-function setOutput(label, instanceId, zone) {
+function setOutput(label, instanceId, zone, machineType, provisioningModel) {
   core.setOutput('label', label);
   core.setOutput('instance-id', instanceId);
   core.setOutput('zone', zone);
+  core.setOutput('machine-type', machineType);
+  core.setOutput('provisioning-model', provisioningModel);
 }
 
 async function start() {
@@ -23,12 +25,15 @@ async function start() {
     githubRegistrationToken = await gh.getRegistrationToken();
   }
 
-  const result = await gcp.startInstance(label, githubRegistrationToken, encodedJitConfig);
+  // Long capacity retries can outlive the one-hour registration token.
+  const result = await gcp.startInstance(label, githubRegistrationToken, encodedJitConfig, {
+    refreshRegistrationToken: gh.getRegistrationToken,
+  });
   const instanceId = result.instanceId;
   const zone = result.zone;
 
   // Set outputs
-  setOutput(label, instanceId, zone);
+  setOutput(label, instanceId, zone, result.machineType, result.provisioningModel);
 
   // Wait for the instance to be running
   await gcp.waitForInstanceRunning(instanceId, zone);

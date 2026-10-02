@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.5.0
+
+- `machine-type` accepts a comma-separated preference list (e.g.
+  `n4a-standard-4,c4a-standard-4`); `zones-config` entries accept `machineType`.
+  Boot disk type (Hyperdisk vs PD) is chosen per attempt.
+- Zone/machine-type combinations not offered by GCE are skipped before trying.
+- `region` accepts a comma-separated list with `zone: any` (multi-region failover).
+- `capacity-retry-minutes` / `capacity-retry-interval-seconds`: retry all
+  combinations on stockout/quota errors; refreshes the registration token.
+- `capacity-advisor`: rank Spot attempts by Capacity Advisor (Preview) scores.
+- New outputs: `machine-type`, `provisioning-model`.
+
 ## v1.0.0
 
 Initial release. GCP Compute Engine port of the
