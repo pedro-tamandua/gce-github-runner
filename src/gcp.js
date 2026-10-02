@@ -1,4 +1,5 @@
 const compute = require('@google-cloud/compute');
+const { GoogleAuth } = require('google-auth-library');
 
 const core = require('@actions/core');
 const config = require('./config');
@@ -322,8 +323,9 @@ function buildBootDisk(zoneConfig) {
 
   // Newer machine families (N4, N4A, C4, C4A, ...) reject pd-* disks. When such
   // a machine type is requested with a Persistent Disk type, transparently
-  // switch to hyperdisk-balanced so the instance can boot.
-  const family = (config.input.machineType || '').split('-')[0].toLowerCase();
+  // switch to hyperdisk-balanced so the instance can boot. Decided per attempt,
+  // since each candidate may use a different machine type.
+  const family = (zoneConfig.machineType || '').split('-')[0].toLowerCase();
   if (HYPERDISK_ONLY_FAMILIES.includes(family) && diskType.startsWith('pd-')) {
     core.info(`Machine family '${family}' requires Hyperdisk; overriding boot disk type '${diskType}' with 'hyperdisk-balanced'`);
     diskType = 'hyperdisk-balanced';
@@ -379,7 +381,7 @@ async function createInstanceWithParams(zoneConfig, instanceName, label, githubR
 
   const instanceResource = {
     name: instanceName,
-    machineType: `zones/${zoneConfig.zone}/machineTypes/${config.input.machineType}`,
+    machineType: `zones/${zoneConfig.zone}/machineTypes/${zoneConfig.machineType}`,
     disks: [buildBootDisk(zoneConfig)],
     networkInterfaces: [buildNetworkInterface(zoneConfig)],
     metadata: { items: metadataItems },
@@ -414,64 +416,278 @@ async function createInstanceWithParams(zoneConfig, instanceName, label, githubR
   return instanceName;
 }
 
-// List the UP zones of a region (used by the 'zone: any' failover mode).
-async function listUpZonesInRegion(region) {
+// List the UP zones of the given regions (used by the 'zone: any' failover mode),
+// keeping the regions in the order they were given.
+async function listUpZonesInRegions(regions) {
   const zonesClient = new compute.ZonesClient();
-  const zones = [];
+  const zonesByRegion = new Map(regions.map((r) => [r, []]));
   const iterable = zonesClient.listAsync({ project: config.projectId });
   for await (const zone of iterable) {
-    if (zone.status === 'UP' && zone.region && zone.region.endsWith(`/regions/${region}`)) {
-      zones.push(zone.name);
+    const region = zone.region ? zone.region.split('/').pop() : '';
+    if (zone.status === 'UP' && zonesByRegion.has(region)) {
+      zonesByRegion.get(region).push(zone.name);
     }
   }
-  if (zones.length === 0) {
-    throw new Error(`No UP zones found in region '${region}'. Check the region name and permissions (compute.zones.list).`);
+  const zones = [];
+  for (const [region, regionZones] of zonesByRegion) {
+    if (regionZones.length === 0) {
+      core.warning(`No UP zones found in region '${region}'.`);
+    }
+    zones.push(...regionZones.sort());
   }
-  return zones.sort();
+  if (zones.length === 0) {
+    throw new Error(`No UP zones found in region(s) '${regions.join(', ')}'. Check the region names and permissions (compute.zones.list).`);
+  }
+  return zones;
 }
 
-async function startInstance(label, githubRegistrationToken, encodedJitConfig) {
-  // Resolve 'zone: any' into a concrete list of zones to try (failover).
-  if (config.anyZone) {
-    const zones = await listUpZonesInRegion(config.anyZoneRegion);
-    config.zones = zones.map((z) => ({ ...config.anyZoneTemplate, zone: z }));
-    core.info(`zone=any resolved to ${zones.length} zone(s) in ${config.anyZoneRegion}: ${zones.join(', ')}`);
+// Expand zone configs x machine types into the ordered list of attempts. The
+// machine-type preference is the outer loop (every zone is tried with the first
+// type before moving to the next one); zones-config entries that pin their own
+// machineType are tried once, in the first pass.
+function buildCandidates(zones, machineTypes) {
+  const candidates = [];
+  const seen = new Set();
+  for (const machineType of machineTypes) {
+    for (const zoneConfig of zones) {
+      const candidate = { ...zoneConfig, machineType: (zoneConfig.machineType || machineType).trim() };
+      const key = [candidate.zone, candidate.machineType, candidate.image, candidate.subnet].join('|');
+      if (!seen.has(key)) {
+        seen.add(key);
+        candidates.push(candidate);
+      }
+    }
+  }
+  return candidates;
+}
+
+function pairKey(zone, machineType) {
+  return `${zone}/${machineType}`;
+}
+
+// Unique (zone, machineType) pairs of a candidate list.
+function uniquePairs(candidates) {
+  const pairs = new Map();
+  candidates.forEach((c) => pairs.set(pairKey(c.zone, c.machineType), { zone: c.zone, machineType: c.machineType }));
+  return [...pairs.values()];
+}
+
+async function mapWithConcurrency(items, limit, fn) {
+  const queue = [...items];
+  const workers = Array.from({ length: Math.min(limit, queue.length) }, async () => {
+    while (queue.length > 0) {
+      await fn(queue.shift());
+    }
+  });
+  await Promise.all(workers);
+}
+
+// gRPC status returned by machineTypes.get when the type is not offered in the zone.
+const GRPC_NOT_FOUND = 5;
+
+// Drop the zone/machine-type combinations GCE does not offer (e.g. T2A only exists
+// in a few zones), so they don't burn attempts. Any other lookup error keeps the
+// candidate and lets the insert decide.
+async function filterOfferedCandidates(candidates) {
+  const machineTypesClient = new compute.MachineTypesClient();
+  const notOffered = new Set();
+  await mapWithConcurrency(uniquePairs(candidates), 20, async ({ zone, machineType }) => {
+    try {
+      await machineTypesClient.get({ project: config.projectId, zone, machineType });
+    } catch (error) {
+      if (error.code === GRPC_NOT_FOUND || error.code === 404) {
+        notOffered.add(pairKey(zone, machineType));
+      } else {
+        core.warning(`Could not check if ${machineType} is offered in ${zone} (${error.message}); trying it anyway`);
+      }
+    }
+  });
+
+  if (notOffered.size > 0) {
+    core.info(`Skipping machine types not offered in the zone: ${[...notOffered].join(', ')}`);
+  }
+  const offered = candidates.filter((c) => !notOffered.has(pairKey(c.zone, c.machineType)));
+  if (offered.length === 0) {
+    throw new Error(`None of the machine types (${config.machineTypes.join(', ')}) is offered in the configured zones.`);
+  }
+  return offered;
+}
+
+// Spot obtainability for one zone/machine type from the Capacity Advisor
+// (compute beta advice.capacity, Preview). Not exposed by the Node client yet.
+async function getCapacityAdvice(authClient, zone, machineType) {
+  const region = regionFromZone(zone);
+  const response = await authClient.request({
+    url: `https://compute.googleapis.com/compute/beta/projects/${config.projectId}/regions/${region}/advice/capacity`,
+    method: 'POST',
+    data: {
+      instanceFlexibilityPolicy: { instanceSelections: { candidate: { machineTypes: [machineType] } } },
+      distributionPolicy: { targetShape: 'ANY_SINGLE_ZONE', zones: [{ zone: `zones/${zone}` }] },
+      size: 1,
+      instanceProperties: { scheduling: { provisioningModel: 'SPOT' } },
+    },
+  });
+  const recommendation = (response.data.recommendations || [])[0];
+  if (!recommendation || !recommendation.scores) {
+    return { obtainability: 0, uptimeSeconds: 0 };
+  }
+  return {
+    obtainability: recommendation.scores.obtainability || 0,
+    uptimeSeconds: parseInt(recommendation.scores.estimatedUptime || '0', 10) || 0,
+  };
+}
+
+// Reorder the Spot attempts by Capacity Advisor scores: obtainability in 0.1
+// buckets (so near-equal scores keep the configured preference), then estimated
+// uptime, then the configured order. Fails open: on any error the configured
+// order is kept, since the API is Preview and only a hint.
+async function rankByCapacityAdvisor(candidates) {
+  let authClient;
+  try {
+    authClient = await new GoogleAuth({ scopes: ['https://www.googleapis.com/auth/cloud-platform'] }).getClient();
+  } catch (error) {
+    core.warning(`Capacity Advisor unavailable (${error.message}); keeping the configured order`);
+    return candidates;
   }
 
+  const scores = new Map();
+  const failures = [];
+  await mapWithConcurrency(uniquePairs(candidates), 8, async ({ zone, machineType }) => {
+    try {
+      scores.set(pairKey(zone, machineType), await getCapacityAdvice(authClient, zone, machineType));
+    } catch (error) {
+      failures.push(`${pairKey(zone, machineType)}: ${error.message}`);
+    }
+  });
+
+  if (scores.size === 0) {
+    core.warning(`Capacity Advisor unavailable (${failures[0]}); keeping the configured order`);
+    return candidates;
+  }
+  if (failures.length > 0) {
+    core.warning(`Capacity Advisor failed for ${failures.length} combination(s), trying them last: ${failures.join('; ')}`);
+  }
+
+  const ranked = candidates.map((candidate, index) => {
+    const score = scores.get(pairKey(candidate.zone, candidate.machineType));
+    return {
+      candidate,
+      index,
+      score,
+      bucket: score ? Math.floor(score.obtainability * 10 + 1e-9) : -1,
+      uptime: score ? score.uptimeSeconds : -1,
+    };
+  });
+  ranked.sort((a, b) => b.bucket - a.bucket || b.uptime - a.uptime || a.index - b.index);
+
+  core.info('Capacity Advisor (Spot) ranking:');
+  ranked.forEach(({ candidate, score }, i) => {
+    const detail = score ? `obtainability=${score.obtainability}, estimatedUptime=${score.uptimeSeconds}s` : 'no score';
+    core.info(`  ${i + 1}. ${candidate.zone} ${candidate.machineType}: ${detail}`);
+  });
+  return ranked.map((r) => r.candidate);
+}
+
+// GCE errors meaning "no capacity right now" (worth retrying later), as opposed
+// to configuration errors that would fail the same way on every retry.
+const CAPACITY_ERROR_PATTERN =
+  /ZONE_RESOURCE_POOL_EXHAUSTED|RESOURCE_POOL_EXHAUSTED|STOCKOUT|does not have enough resources|RESOURCE_EXHAUSTED|QUOTA_EXCEEDED|Quota .*exceeded|UNAVAILABLE/i;
+
+function isCapacityError(error) {
+  return CAPACITY_ERROR_PATTERN.test((error && error.message) || '');
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// GitHub registration tokens expire after one hour; refresh well before that.
+const REGISTRATION_TOKEN_MAX_AGE_MS = 45 * 60 * 1000;
+
+async function startInstance(label, githubRegistrationToken, encodedJitConfig, options = {}) {
+  // Resolve 'zone: any' into a concrete list of zones to try (failover).
+  if (config.anyZone) {
+    const zones = await listUpZonesInRegions(config.anyZoneRegions);
+    config.zones = zones.map((z) => ({ ...config.anyZoneTemplate, zone: z }));
+    core.info(`zone=any resolved to ${zones.length} zone(s) in ${config.anyZoneRegions.join(', ')}: ${zones.join(', ')}`);
+  }
+
+  const candidates = await filterOfferedCandidates(buildCandidates(config.zones, config.machineTypes));
+
   // Provisioning models to try, in order. The preferred one is attempted across
-  // ALL zones first; only if it has no capacity anywhere do we fall back to the other.
+  // ALL candidates first; only if it has no capacity anywhere do we fall back to the other.
   const other = config.provisioningModel === 'spot' ? 'standard' : 'spot';
   const models = config.provisioningFallback ? [config.provisioningModel, other] : [config.provisioningModel];
 
   core.info(
-    `Attempting to start GCE instance across ${config.zones.length} zone(s); ` +
-    `provisioning model preference: ${models.join(' -> ')}`
+    `Attempting to start GCE instance across ${candidates.length} zone/machine-type combination(s); ` +
+      `machine types: ${config.machineTypes.join(' -> ')}; provisioning model preference: ${models.join(' -> ')}`
   );
 
   const instanceName = config.generateInstanceName(label);
-  const errors = [];
+  const retryMinutes = config.input.capacityRetryMinutes;
+  const retryIntervalMs = config.input.capacityRetryIntervalSeconds * 1000;
+  const retryDeadline = Date.now() + retryMinutes * 60 * 1000;
+  let registrationToken = githubRegistrationToken;
+  let registrationTokenIssuedAt = Date.now();
+  let errors = [];
 
-  for (const model of models) {
-    core.info(`=== Trying provisioning model: ${model} ===`);
-    for (let i = 0; i < config.zones.length; i++) {
-      const zoneConfig = config.zones[i];
-      core.info(`[${model}] zone ${i + 1}/${config.zones.length} — image: ${zoneConfig.image}, zone: ${zoneConfig.zone}, subnet: ${zoneConfig.subnet}`);
+  for (let round = 1; ; round++) {
+    errors = [];
+    let capacityErrors = 0;
 
-      try {
-        await createInstanceWithParams(zoneConfig, instanceName, label, githubRegistrationToken, encodedJitConfig, model);
-        core.info(`Successfully started GCE instance ${instanceName} as '${model}' in zone ${zoneConfig.zone}`);
-        return { instanceId: instanceName, zone: zoneConfig.zone, provisioningModel: model };
-      } catch (error) {
-        const errorMessage = `[${model}] zone ${zoneConfig.zone} failed: ${error.message}`;
-        core.warning(errorMessage);
-        errors.push(errorMessage);
-        continue;
+    for (const model of models) {
+      const ordered = model === 'spot' && config.input.capacityAdvisor ? await rankByCapacityAdvisor(candidates) : candidates;
+      core.info(`=== Trying provisioning model: ${model}${round > 1 ? ` (round ${round})` : ''} ===`);
+
+      for (let i = 0; i < ordered.length; i++) {
+        const candidate = ordered[i];
+        core.info(
+          `[${model}] ${i + 1}/${ordered.length} — zone: ${candidate.zone}, machine type: ${candidate.machineType}, ` +
+            `image: ${candidate.image}, subnet: ${candidate.subnet}`
+        );
+
+        try {
+          await createInstanceWithParams(candidate, instanceName, label, registrationToken, encodedJitConfig, model);
+          core.info(`Successfully started GCE instance ${instanceName} (${candidate.machineType}, ${model}) in zone ${candidate.zone}`);
+          return { instanceId: instanceName, zone: candidate.zone, machineType: candidate.machineType, provisioningModel: model };
+        } catch (error) {
+          const errorMessage = `[${model}] ${candidate.zone}/${candidate.machineType} failed: ${error.message}`;
+          core.warning(errorMessage);
+          errors.push(errorMessage);
+          if (isCapacityError(error)) {
+            capacityErrors++;
+          }
+        }
       }
+      core.warning(`No capacity for provisioning model '${model}' in any zone/machine type.`);
     }
-    core.warning(`No capacity for provisioning model '${model}' in any zone.`);
+
+    if (retryMinutes <= 0) {
+      break;
+    }
+    if (capacityErrors === 0) {
+      core.warning('No attempt failed for lack of capacity; not retrying (fix the errors above).');
+      break;
+    }
+    if (Date.now() + retryIntervalMs >= retryDeadline) {
+      core.warning(`capacity-retry-minutes (${retryMinutes}) exhausted after ${round} round(s).`);
+      break;
+    }
+
+    core.info(
+      `No capacity in round ${round}; retrying in ${config.input.capacityRetryIntervalSeconds}s ` +
+        `(until ${new Date(retryDeadline).toISOString()})`
+    );
+    await sleep(retryIntervalMs);
+
+    if (registrationToken && options.refreshRegistrationToken && Date.now() - registrationTokenIssuedAt > REGISTRATION_TOKEN_MAX_AGE_MS) {
+      registrationToken = await options.refreshRegistrationToken();
+      registrationTokenIssuedAt = Date.now();
+    }
   }
 
-  core.error('All provisioning models and zones failed');
+  core.error('All provisioning models, zones and machine types failed');
   throw new Error(`Failed to start GCE instance. Errors: ${errors.join('; ')}`);
 }
 
@@ -562,4 +778,6 @@ module.exports = {
   getInstanceConsoleOutput,
   // Exposed for testing only
   _buildStartupScriptForTest: buildStartupScript,
+  _buildCandidatesForTest: buildCandidates,
+  _isCapacityErrorForTest: isCapacityError,
 };

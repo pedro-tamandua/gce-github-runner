@@ -116,8 +116,9 @@ Create three jobs: `start-runner`, your actual job (`runs-on` the runner label),
 | `github-token` | Always | GitHub Personal Access Token with the `repo` scope. |
 | `project-id` | Optional | Google Cloud project id. Falls back to `GCP_PROJECT_ID` / `GOOGLE_CLOUD_PROJECT` / `GCLOUD_PROJECT`. |
 | `image` | `start` (unless `zones-config`) | Source image for the boot disk, e.g. `projects/debian-cloud/global/images/family/debian-12`. |
-| `machine-type` | `start` | Compute Engine machine type, e.g. `e2-small`, `n2-standard-4`. |
-| `zone` | `start` (unless `zones-config`) | Compute Engine zone, e.g. `us-central1-a`. |
+| `machine-type` | `start` | Compute Engine machine type, e.g. `e2-small`, `n2-standard-4`. Accepts a comma-separated preference list, e.g. `n4a-standard-4,c4a-standard-4` (see [capacity failover](#advanced-capacity-failover-machine-types-regions-retry)). |
+| `zone` | `start` (unless `zones-config`) | Compute Engine zone, e.g. `us-central1-a`, or `any` to try every UP zone of `region`. |
+| `region` | With `zone: any` | Region(s) whose zones are tried, e.g. `us-central1` or `us-central1,us-east4` (in order). |
 | `subnet` | `start` (unless `zones-config`) | Subnetwork name (or self-link) in the region of the chosen zone. |
 | `network` | Optional | VPC network name. Default: `default`. |
 | `network-tags` | Optional | JSON array of network tags for firewall matching. Example: `'["github-runner"]'`. |
@@ -130,8 +131,13 @@ Create three jobs: `start-runner`, your actual job (`runs-on` the runner label),
 | `resource-labels` | Optional | Stringified array of `{"Key","Value"}` objects applied as instance labels. |
 | `runner-home-dir` | Optional | Directory with pre-installed actions-runner software (skips download). |
 | `pre-runner-script` | Optional | Bash commands to run before the runner starts. |
-| `spot` | Optional | `true` to create a Spot VM. Default: `false`. |
-| `zones-config` | Optional | JSON array of `{image, zone, subnet, network?, networkTags?}` for multi-zone failover. |
+| `provisioning-model` | Optional | Preferred model: `spot` or `standard`. Default: `spot`. |
+| `provisioning-fallback` | Optional | Try the other model when the preferred one has no capacity anywhere. Default: `true`. |
+| `spot` | Optional | Deprecated alias for `provisioning-model: spot`. |
+| `zones-config` | Optional | JSON array of `{image, zone, subnet, network?, networkTags?, machineType?}` for multi-zone failover. |
+| `capacity-retry-minutes` | Optional | Keep retrying all combinations for up to N minutes on stockout/quota errors. Default: `0` (no retry). |
+| `capacity-retry-interval-seconds` | Optional | Wait between retry rounds. Default: `60`. |
+| `capacity-advisor` | Optional | `true` to rank Spot attempts by the Capacity Advisor (Preview) scores. Default: `false`. |
 | `startup-quiet-period-seconds` | Optional | Quiet period before checking registration. Default: `30`. |
 | `startup-retry-interval-seconds` | Optional | Retry interval for registration checks. Default: `10`. |
 | `startup-timeout-minutes` | Optional | Registration timeout. Default: `5`. |
@@ -151,6 +157,8 @@ Create three jobs: `start-runner`, your actual job (`runs-on` the runner label),
 | `label` | Unique label assigned to the runner. Use it as `runs-on` and to remove the runner. |
 | `instance-id` | Compute Engine instance name. Pass it to `stop` mode to delete the VM. |
 | `zone` | Zone where the instance was created. Pass it to `stop` mode as `instance-zone`. |
+| `machine-type` | Machine type the instance was created with. |
+| `provisioning-model` | `spot` or `standard`. |
 
 ## Example
 
@@ -243,6 +251,32 @@ JIT (Just-In-Time) runners use GitHub's `generate-jitconfig` API to create singl
               {"image": "projects/debian-cloud/global/images/family/debian-12", "zone": "us-east1-b", "subnet": "default"}
             ]
 ```
+
+## Advanced: Capacity failover (machine types, regions, retry)
+
+Scarce machine types (e.g. ARM T2A / C4A / N4A Spot) often fail with `ZONE_RESOURCE_POOL_EXHAUSTED`. Combine these options to widen the search:
+
+```yml
+      - name: Start GCE runner (ARM)
+        uses: your-org/gce-github-runner@v1
+        with:
+          mode: start
+          github-token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
+          image: projects/my-project/global/images/family/runner-arm64
+          machine-type: n4a-standard-4,c4a-standard-4   # preference order
+          zone: any
+          region: us-central1,us-east4                   # subnet must exist in both
+          subnet: my-subnet
+          capacity-retry-minutes: 60                     # keep trying on stockout
+          capacity-advisor: true                         # rank Spot attempts by obtainability
+```
+
+Order of attempts: for each provisioning model (`spot`, then `standard` if `provisioning-fallback`), every zone is tried with the first machine type, then with the next one. `zones-config` entries can pin their own `machineType`.
+
+- **Offer check** — before trying, the action checks which zone/machine-type combinations exist (`compute.machineTypes.get`) and skips the rest.
+- **Capacity Advisor** — with `capacity-advisor: true`, the Spot attempts are reordered by the [Capacity Advisor](https://cloud.google.com/compute/docs/instances/view-vm-availability) obtainability (in 0.1 buckets, so near-equal scores keep your order) and estimated uptime. It is a Preview API, Spot only, and a hint, not a guarantee; it needs `compute.advice.capacity` (`roles/compute.viewer`). If it fails, the configured order is kept.
+- **Retry** — with `capacity-retry-minutes`, the whole set is retried every `capacity-retry-interval-seconds` while attempts fail for capacity/quota reasons. Configuration errors stop the retry immediately. The registration token is refreshed on long retries (non-JIT).
+- All machine types must match the image architecture (ARM vs x86); for mixed sets, pin `machineType` and `image` per `zones-config` entry.
 
 ## Advanced: Spot VMs
 

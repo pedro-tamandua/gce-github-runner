@@ -193,7 +193,7 @@ describe('Config - GCP specifics', () => {
     setupInputs({ zone: 'any', region: 'us-central1' });
     const config = createConfig();
     expect(config.anyZone).toBe(true);
-    expect(config.anyZoneRegion).toBe('us-central1');
+    expect(config.anyZoneRegions).toEqual(['us-central1']);
     expect(config.zones).toHaveLength(0); // resolved at runtime
   });
 

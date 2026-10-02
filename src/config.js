@@ -1,6 +1,13 @@
 const core = require('@actions/core');
 const github = require('@actions/github');
 
+// Arm64 machine families (Ampere Altra T2A, Google Axion C4A/N4A).
+const ARM_FAMILIES = ['t2a', 'c4a', 'n4a'];
+
+function isArmMachineType(machineType) {
+  return ARM_FAMILIES.includes(machineType.split('-')[0].toLowerCase());
+}
+
 class Config {
   constructor() {
     this.input = {
@@ -41,7 +48,20 @@ class Config {
       useJit: core.getInput('use-jit') === 'true',
       runnerGroupId: parseInt(core.getInput('runner-group-id') || '1', 10),
       runnerDebug: core.getInput('runner-debug') === 'true',
+      // Capacity handling: keep retrying all zones/models/machine types for up to
+      // capacityRetryMinutes when GCE reports a stockout, and optionally rank the
+      // Spot attempts by the Capacity Advisor (advice.capacity, Preview) scores.
+      capacityRetryMinutes: Number(core.getInput('capacity-retry-minutes') || '0'),
+      capacityRetryIntervalSeconds: Number(core.getInput('capacity-retry-interval-seconds') || '60'),
+      capacityAdvisor: core.getInput('capacity-advisor') === 'true',
     };
+
+    // 'machine-type' accepts a comma-separated list of alternatives in preference
+    // order, e.g. 'n4a-standard-4,c4a-standard-4'.
+    this.machineTypes = (this.input.machineType || '')
+      .split(',')
+      .map((m) => m.trim())
+      .filter(Boolean);
 
     // Resolve the Google Cloud project id from the input or the environment
     // variables exported by google-github-actions/auth (and the gcloud SDK).
@@ -110,6 +130,10 @@ class Config {
             if (!z.subnet) {
               throw new Error(`Missing subnet in zones-config at index ${index}`);
             }
+            // Optional per-entry machine type; overrides 'machine-type' for this entry.
+            if (z.machineType !== undefined && (typeof z.machineType !== 'string' || !z.machineType.trim())) {
+              throw new Error(`Invalid machineType in zones-config at index ${index}: must be a non-empty string`);
+            }
             // Optional fields. Leave network empty when not set so GCE infers
             // it from the subnetwork (avoids non-default VPC mismatches).
             if (!z.network) {
@@ -125,28 +149,32 @@ class Config {
       }
 
       // Check for required machine type regardless of config method
-      if (!this.input.machineType) {
+      if (this.machineTypes.length === 0) {
         throw new Error(`The 'machine-type' input is required for the 'start' mode.`);
       }
 
-      // Any-zone mode: expand to every UP zone of a region at runtime (failover).
+      // Any-zone mode: expand to every UP zone of one or more regions at runtime (failover).
       this.anyZone = false;
       if (this.zones.length === 0 && this.input.zone.toLowerCase() === 'any') {
-        if (!this.input.region) {
+        const regions = (this.input.region || '')
+          .split(',')
+          .map((r) => r.trim())
+          .filter(Boolean);
+        if (regions.length === 0) {
           throw new Error(`The 'region' input is required when 'zone' is 'any'.`);
         }
         if (!this.input.image || !this.input.subnet) {
           throw new Error(`When 'zone' is 'any', 'image' and 'subnet' are also required.`);
         }
         this.anyZone = true;
-        this.anyZoneRegion = this.input.region;
+        this.anyZoneRegions = regions;
         this.anyZoneTemplate = {
           image: this.input.image,
           subnet: this.input.subnet,
           network: this.input.network || '',
           networkTags: this.input.networkTags,
         };
-        core.info(`zone=any: zones of region '${this.input.region}' will be resolved at runtime`);
+        core.info(`zone=any: zones of region(s) '${regions.join(', ')}' will be resolved at runtime`);
       }
 
       // If no zones config provided (and not any-zone), build one from the individual parameters
@@ -178,6 +206,23 @@ class Config {
       // Expose at top level for gcp.js
       this.provisioningModel = this.input.provisioningModel;
       this.provisioningFallback = this.input.provisioningFallback;
+
+      if (!Number.isFinite(this.input.capacityRetryMinutes) || this.input.capacityRetryMinutes < 0) {
+        throw new Error(`Invalid 'capacity-retry-minutes' input: must be a number >= 0.`);
+      }
+      if (!Number.isFinite(this.input.capacityRetryIntervalSeconds) || this.input.capacityRetryIntervalSeconds < 0) {
+        throw new Error(`Invalid 'capacity-retry-interval-seconds' input: must be a number >= 0.`);
+      }
+
+      // One boot image cannot serve both ARM and x86 machine types.
+      const allMachineTypes = this.machineTypes.concat(this.zones.filter((z) => z.machineType).map((z) => z.machineType));
+      const archs = new Set(allMachineTypes.map((m) => (isArmMachineType(m) ? 'arm64' : 'x86_64')));
+      if (archs.size > 1) {
+        core.warning(
+          `Machine types mix ARM and x86 (${allMachineTypes.join(', ')}). ` +
+            'Make sure each zones-config entry uses an image built for its machine type architecture.'
+        );
+      }
 
       if (this.input.useJit && this.input.runAsService) {
         throw new Error(
